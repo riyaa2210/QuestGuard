@@ -1,281 +1,432 @@
-# QueueGuard
-**AI-assisted webhook reliability platform.**  
-Register destination endpoints, submit webhook events, and let QueueGuard handle delivery — with automatic retries, exponential backoff, dead-lettering, idempotency, and optional LLM-powered failure explanations.
+# QueueGuard 🚦
+### AI-Assisted Webhook Reliability Platform
 
----
+QueueGuard is a webhook delivery platform designed to make event delivery more reliable across distributed applications. It provides asynchronous processing, automatic retries, exponential backoff, idempotency, dead-letter handling, and delivery monitoring, with optional LLM-powered explanations for failed deliveries.
 
-## Architecture
+Instead of managing webhook failures manually, developers can register destination endpoints, submit events, track delivery attempts, and replay failed events through a centralized dashboard.
 
+## ✨ Key Features
+
+- **Reliable Webhook Delivery:** Process webhook events asynchronously using AWS SQS and Lambda.
+- **Automatic Retries:** Retry failed deliveries with exponential backoff to handle temporary network failures and unavailable endpoints.
+- **Idempotent Event Submission:** Prevent duplicate event creation using PostgreSQL constraints and idempotency keys.
+- **Dead-Letter Queue (DLQ):** Isolate events that exhaust their retry attempts for investigation and recovery.
+- **Delivery History:** Track event status, inspect delivery attempts, and replay failed events.
+- **AI-Powered Failure Explanations:** Optionally use OpenAI to generate summaries of delivery failures.
+- **Infrastructure as Code:** Provision AWS resources using Terraform.
+- **Local Development:** Run the application using Docker Compose and LocalStack without requiring a live AWS account.
+
+## 🏗️ Architecture
+
+```mermaid
+flowchart TD
+    A[Client Application] -->|Submit Event| B[FastAPI Backend]
+    B --> C[(PostgreSQL)]
+    B --> D[Amazon SQS Main Queue]
+
+    D --> E[AWS Lambda Delivery Handler]
+    E -->|HTTP POST| F[Destination Endpoint]
+
+    F -->|2xx Response| G[Mark Event Delivered]
+    F -->|Failure or Timeout| H{Retry Limit Reached?}
+
+    H -->|No| I[Exponential Backoff]
+    I --> D
+
+    H -->|Yes| J[Dead-Letter Queue]
+    J --> K[DLQ Lambda Handler]
+    K --> L[Mark Event Dead-Lettered]
+    K --> M[Optional AI Failure Explanation]
+
+    E --> N[CloudWatch Logs and Metrics]
+    K --> N
+
+    C --> O[React Dashboard]
+    N --> O
+
+    O --> P[Inspect, Filter and Replay Events]
 ```
-Caller ──POST /events/{endpoint_id}──▶ FastAPI (Python)
-                                            │
-                                       PostgreSQL
-                                       (events, attempts)
-                                            │
-                                       SQS Main Queue
-                                            │
-                                    Lambda: delivery handler
-                                       │              │
-                              HTTP POST endpoint    Retry (delay)
-                                   200–299?              │
-                                    Yes ──▶ mark delivered
-                                    No  ──▶ re-enqueue with backoff
-                                              │ (after MAX_RETRY_ATTEMPTS)
-                                         SQS Dead-Letter Queue
-                                              │
-                                    Lambda: DLQ handler
-                                         mark dead_lettered
-                                         AI explanation (optional)
-                                              │
-                                       CloudWatch Logs
-                                       (metrics, alarms)
-                                            │
-                                    React Dashboard
-                                    (view, filter, replay)
-```
 
-**Key design decisions:**
+### Event Delivery Workflow
 
-- **At-least-once delivery.** Network retries and Lambda retries mean a downstream endpoint _may_ receive a message more than once. QueueGuard never claims exactly-once delivery.
-- **Idempotency** is enforced with a PostgreSQL partial unique index on `(endpoint_id, idempotency_key)`. Duplicate submissions return HTTP 200 with the original event — no re-enqueue.
-- **Exponential backoff**: 30 s → 60 s → 120 s → 240 s → 480 s (capped at 900 s, the SQS maximum).
-- **AI explanations** are entirely optional. Set `OPENAI_API_KEY` in your environment to enable GPT-powered failure summaries on delivery attempts and DLQ events.
-- **Local dev mode**: Docker Compose spins up PostgreSQL + LocalStack (SQS emulation). No AWS account needed for local development.
+1. **Register an endpoint:** The client registers a destination URL through the FastAPI backend.
+2. **Submit an event:** The client submits an event containing its type, payload, and optional idempotency key.
+3. **Persist and enqueue:** The backend stores the event in PostgreSQL and sends it to the SQS main queue.
+4. **Deliver asynchronously:** An AWS Lambda function consumes the queued event and sends an HTTP POST request to the destination.
+5. **Handle failures:** Failed requests are retried using exponential backoff.
+6. **Move exhausted events:** Events that exceed the configured retry limit are routed to the dead-letter queue.
+7. **Investigate and recover:** The dashboard displays delivery history and supports replaying failed events. An optional AI component generates failure explanations.
 
----
+## ⚙️ Technical Design Decisions
 
-## Project Structure
+| Decision | Implementation | Rationale |
+|---|---|---|
+| Asynchronous processing | Amazon SQS + AWS Lambda | Separates event submission from delivery and allows delivery processing to scale independently. |
+| Idempotency | PostgreSQL partial unique index | Prevents duplicate event creation for the same endpoint and idempotency key. |
+| Retry strategy | Exponential backoff | Increases the delay between attempts to reduce repeated requests during temporary failures. |
+| Dead-letter handling | SQS DLQ + Lambda | Separates events that exhaust their retries from normal delivery processing. |
+| AI failure analysis | Optional OpenAI integration | Provides human-readable explanations to help developers investigate failures. |
+| Infrastructure provisioning | Terraform | Makes AWS infrastructure configuration reproducible and version-controlled. |
+| Local development | Docker Compose + LocalStack | Allows developers to test the application locally without a live AWS environment. |
 
-```
+### Retry Strategy
+
+QueueGuard uses exponential backoff to space out retries:
+
+`30s → 60s → 120s → 240s → 480s`
+
+The delay is capped at 900 seconds, matching the SQS maximum delay for an individual message.
+
+### Delivery Guarantees and Idempotency
+
+QueueGuard follows an **at-least-once delivery model**, meaning a destination may receive the same event more than once.
+
+To prevent duplicate event creation, QueueGuard uses a PostgreSQL partial unique index on `(endpoint_id, idempotency_key)`. Repeated submissions with the same key return the original event rather than enqueueing another one.
+
+Downstream services should also implement idempotent event processing because duplicate HTTP deliveries remain possible.
+
+## 🛠️ Tech Stack
+
+| Category | Technologies |
+|---|---|
+| Backend | Python, FastAPI, Pydantic |
+| Database | PostgreSQL, SQLAlchemy, Alembic |
+| Message Queue | Amazon SQS |
+| Serverless Processing | AWS Lambda |
+| Monitoring | Amazon CloudWatch |
+| Infrastructure as Code | Terraform |
+| Frontend | React, TypeScript, Vite |
+| AI Integration | OpenAI API |
+| Local Development | Docker, Docker Compose, LocalStack |
+| Testing | pytest, SQLite for tests |
+
+## 📁 Project Structure
+
+```text
 queueguard/
-├── app/                   FastAPI backend
-│   ├── models/            SQLAlchemy ORM models
-│   ├── schemas/           Pydantic request/response schemas
-│   ├── services/          Business logic (endpoint, event, SQS, idempotency)
-│   ├── routers/           FastAPI route handlers
-│   ├── config.py          Pydantic Settings (reads .env)
-│   ├── database.py        Async SQLAlchemy engine + session dep
-│   └── main.py            App factory
-├── alembic/               Database migrations
-├── lambda/                AWS Lambda handlers
-│   ├── handler.py         Delivery processor (SQS → HTTP POST → retry)
-│   ├── dlq_handler.py     Dead-letter queue processor
-│   ├── ai_explainer.py    Optional LLM failure explainer
-│   ├── cloudwatch_logger.py  Structured CloudWatch log emitter
-│   └── db.py              Sync SQLAlchemy session for Lambda
-├── terraform/             AWS infrastructure as code
-│   ├── sqs.tf             Main queue + DLQ
-│   ├── lambda.tf          Delivery + DLQ Lambda functions
-│   ├── iam.tf             Execution roles
-│   └── cloudwatch.tf      Log groups, metric filters, alarms
-├── frontend/              React dashboard (Vite + TypeScript)
+├── app/
+│   ├── models/             # SQLAlchemy ORM models
+│   ├── schemas/            # Pydantic request/response schemas
+│   ├── services/           # Business logic and integrations
+│   ├── routers/            # FastAPI route handlers
+│   ├── config.py           # Application configuration
+│   ├── database.py         # Async database engine and sessions
+│   └── main.py             # Application entry point
+├── alembic/                # Database migrations
+├── lambda/
+│   ├── handler.py          # Webhook delivery processor
+│   ├── dlq_handler.py      # Dead-letter queue processor
+│   ├── ai_explainer.py     # Optional AI failure explanations
+│   ├── cloudwatch_logger.py
+│   └── db.py               # Synchronous database sessions
+├── terraform/
+│   ├── sqs.tf              # Main queue and DLQ
+│   ├── lambda.tf           # Lambda functions and mappings
+│   ├── iam.tf              # IAM execution roles
+│   └── cloudwatch.tf       # Logs, metrics and alarms
+├── frontend/
 │   └── src/
-│       ├── api/client.ts  Typed API wrapper (axios)
-│       ├── pages/         EndpointsPage, EventsPage
-│       └── components/    Layout, StatusBadge, Spinner
-├── tests/                 pytest test suite
-├── scripts/               LocalStack init, Lambda packaging
-├── docker-compose.yml     Local dev stack
-├── pyproject.toml         Python dependencies
-└── .env.example           Environment variable reference
+│       ├── api/            # Typed API client
+│       ├── pages/          # Dashboard pages
+│       └── components/     # Reusable UI components
+├── tests/                  # pytest test suite
+├── scripts/                # LocalStack initialization and packaging
+├── docker-compose.yml
+├── pyproject.toml
+└── .env.example
 ```
 
----
-
-## Local Development Setup
+## 🚀 Getting Started
 
 ### Prerequisites
 
-- Docker Desktop (for Compose)
+- Docker Desktop
 - Python 3.11+
-- Node 20+
+- Node.js 20+
 
-### 1 — Clone and configure
+### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/your-org/queueguard.git
-cd queueguard
-cp .env.example .env
-# Edit .env if needed; defaults work out of the box with Docker Compose
+git clone https://github.com/riyaa2210/QueueGuard.git
+cd QueueGuard
 ```
 
-### 2 — Start all services
+> Replace the repository URL with your actual GitHub repository URL if the repository name or capitalization differs.
+
+### 2. Configure Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Update `.env` if required. Use a strong, randomly generated application secret, and never commit real credentials or API keys.
+
+The default configuration is intended for local development with Docker Compose and LocalStack.
+
+### 3. Start the Application
 
 ```bash
 docker compose up --build
 ```
 
-This starts:
-- **PostgreSQL** on `localhost:5432`
-- **LocalStack** (SQS + CloudWatch emulation) on `localhost:4566`
-- **FastAPI** on `http://localhost:8000` (runs migrations on startup)
-- **React dev server** on `http://localhost:5173`
+Once the services start, the application components should be accessible at:
 
-### 3 — Run without Docker (backend only)
+| Service | Address |
+|---|---|
+| FastAPI Backend | `http://localhost:8000` |
+| Interactive API Documentation | `http://localhost:8000/docs` |
+| React Dashboard | `http://localhost:5173` |
+| PostgreSQL | `localhost:5432` |
+| LocalStack | `http://localhost:4566` |
+
+The backend runs database migrations during startup according to the project's configured startup process.
+
+### 4. Run the Backend Without Docker
+
+Create and activate a virtual environment:
 
 ```bash
-# Create a virtual environment
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python -m venv .venv
+```
 
-# Install dependencies
+On Windows:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+On macOS or Linux:
+
+```bash
+source .venv/bin/activate
+```
+
+Install the project and development dependencies:
+
+```bash
 pip install -e ".[dev]"
+```
 
-# Start PostgreSQL and LocalStack separately (or adjust DATABASE_URL to point at your own PG)
-# Then:
+Start PostgreSQL and LocalStack separately, or configure the database and AWS endpoints for your environment.
+
+Apply database migrations and start the API:
+
+```bash
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
 
-### 4 — Run tests
+### 5. Run Tests
 
 ```bash
-pip install -e ".[dev]"
-pytest                        # all tests with coverage
-pytest tests/test_events.py   # specific file
-pytest -v -k "idempotency"    # specific test
+pytest
 ```
 
----
-
-## API Reference
-
-### Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/endpoints` | Register a new endpoint |
-| `GET` | `/api/v1/endpoints` | List all endpoints |
-| `GET` | `/api/v1/endpoints/{id}` | Get a single endpoint |
-| `PATCH` | `/api/v1/endpoints/{id}` | Update URL / description / active state |
-| `DELETE` | `/api/v1/endpoints/{id}` | Delete endpoint (cascades to events) |
-
-### Events
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/v1/events/{endpoint_id}` | Submit an event |
-| `GET` | `/api/v1/events/{endpoint_id}` | List events for an endpoint (paginated) |
-| `GET` | `/api/v1/events/detail/{event_id}` | Get event + all delivery attempts |
-| `GET` | `/api/v1/events/detail/{event_id}/attempts` | List delivery attempts |
-| `POST` | `/api/v1/events/detail/{event_id}/replay` | Re-enqueue a failed/dead-lettered event |
-
-### Interactive docs
-
-`http://localhost:8000/docs`
-
----
-
-### API Examples
-
-#### Register an endpoint
+Run a specific test file:
 
 ```bash
-curl -s -X POST http://localhost:8000/api/v1/endpoints \
+pytest tests/test_events.py
+```
+
+Run tests related to idempotency:
+
+```bash
+pytest -v -k "idempotency"
+```
+
+The test suite uses SQLite for faster execution. Some PostgreSQL-specific functionality may require separate integration testing.
+
+## 📡 API Reference
+
+QueueGuard exposes REST APIs for endpoint management, event submission, delivery tracking, and replay.
+
+### Endpoint Management
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/endpoints` | Register a destination endpoint |
+| `GET` | `/api/v1/endpoints` | List registered endpoints |
+| `GET` | `/api/v1/endpoints/{id}` | Retrieve an endpoint |
+| `PATCH` | `/api/v1/endpoints/{id}` | Update endpoint details or active status |
+| `DELETE` | `/api/v1/endpoints/{id}` | Delete an endpoint |
+
+### Event Management
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/v1/events/{endpoint_id}` | Submit a webhook event |
+| `GET` | `/api/v1/events/{endpoint_id}` | List events with pagination and filtering |
+| `GET` | `/api/v1/events/detail/{event_id}` | Retrieve an event and its delivery attempts |
+| `GET` | `/api/v1/events/detail/{event_id}/attempts` | List delivery attempts |
+| `POST` | `/api/v1/events/detail/{event_id}/replay` | Replay a failed or dead-lettered event |
+
+## 💻 API Usage Examples
+
+### 1. Register a Destination Endpoint
+
+```bash
+curl -X POST http://localhost:8000/api/v1/endpoints \
   -H "Content-Type: application/json" \
   -d '{
     "url": "https://webhook.site/your-unique-id",
-    "description": "My test hook",
-    "event_types": ["order.created", "payment.failed"]
-  }' | jq
+    "description": "My test webhook",
+    "event_types": [
+      "order.created",
+      "payment.failed"
+    ]
+  }'
 ```
 
-#### Submit a webhook event
+Save the returned endpoint ID for subsequent requests.
+
+### 2. Submit a Webhook Event
 
 ```bash
-curl -s -X POST http://localhost:8000/api/v1/events/<endpoint_id> \
+curl -X POST http://localhost:8000/api/v1/events/<endpoint_id> \
   -H "Content-Type: application/json" \
   -d '{
     "event_type": "order.created",
-    "payload": { "order_id": 1234, "amount": 99.99 },
+    "payload": {
+      "order_id": 1234,
+      "amount": 99.99
+    },
     "idempotency_key": "order-1234-v1"
-  }' | jq
+  }'
 ```
 
-#### Submit a duplicate (idempotency)
+QueueGuard persists the event and queues it for asynchronous delivery.
+
+### 3. Test Idempotency
+
+Submit the same event again using the same endpoint ID and idempotency key.
 
 ```bash
-# Sending the same idempotency_key again returns HTTP 200 + original event
-curl -s -o /dev/null -w "%{http_code}" \
-  -X POST http://localhost:8000/api/v1/events/<endpoint_id> \
+curl -i -X POST \
+  http://localhost:8000/api/v1/events/<endpoint_id> \
   -H "Content-Type: application/json" \
-  -d '{"event_type":"order.created","payload":{},"idempotency_key":"order-1234-v1"}'
-# → 200
+  -d '{
+    "event_type": "order.created",
+    "payload": {},
+    "idempotency_key": "order-1234-v1"
+  }'
 ```
 
-#### View delivery history
+A duplicate submission returns HTTP `200` with the original event rather than creating another event.
+
+### 4. Inspect Delivery History
+
+Retrieve events for an endpoint, filtering by status where supported:
 
 ```bash
-curl "http://localhost:8000/api/v1/events/<endpoint_id>?status=failed&page=1&page_size=20" | jq
+curl \
+  "http://localhost:8000/api/v1/events/<endpoint_id>?status=failed&page=1&page_size=20"
 ```
 
-#### Replay a failed event
+### 5. Replay a Failed Event
 
 ```bash
-curl -s -X POST http://localhost:8000/api/v1/events/detail/<event_id>/replay | jq
+curl -X POST \
+  http://localhost:8000/api/v1/events/detail/<event_id>/replay
 ```
 
----
+Use the returned response to verify that the event was accepted for replay.
 
-## AWS Production Deployment
+## ☁️ AWS Deployment
 
-### 1 — Build the Lambda package
+QueueGuard uses Terraform to define its AWS infrastructure.
+
+### 1. Package the Lambda Functions
+
+From the repository root:
 
 ```bash
 bash scripts/package_lambda.sh
-# Outputs: lambda/queueguard_lambda.zip
 ```
 
-### 2 — Provision infrastructure
+The script generates the Lambda deployment package at:
+
+```text
+lambda/queueguard_lambda.zip
+```
+
+### 2. Configure Terraform
 
 ```bash
 cd terraform
 cp terraform.tfvars.example terraform.tfvars
-# Fill in database_url, aws_region, etc.
+```
 
+Configure the required infrastructure variables, including the AWS region and database connection settings.
+
+### 3. Provision the Infrastructure
+
+```bash
 terraform init
 terraform plan
 terraform apply
 ```
 
-Terraform creates:
-- SQS main queue + dead-letter queue with redrive policy
-- Two Lambda functions (delivery + DLQ processor) with SQS event source mappings
-- IAM execution role with least-privilege SQS + CloudWatch permissions
-- CloudWatch log groups, metric filters for delivery success/failure, DLQ depth alarm
+Review the execution plan before applying infrastructure changes to an AWS account.
 
-### 3 — Deploy the API
+The Terraform configuration provisions:
 
-The FastAPI backend can be deployed to any Python host (ECS, App Runner, EC2, etc.). Set the environment variables from `.env.example` using your hosting platform's secrets/config mechanism. Never store credentials in code or config files.
+- An SQS main queue and dead-letter queue.
+- Lambda functions for delivery processing and dead-letter handling.
+- SQS event source mappings for the Lambda consumers.
+- IAM execution roles and permissions.
+- CloudWatch log groups, metric filters, and alarms.
+
+### 4. Deploy the Backend
+
+Deploy the FastAPI backend to a suitable Python hosting environment, such as Amazon ECS, AWS App Runner, or Amazon EC2.
+
+Configure environment variables and secrets through the hosting platform. Ensure the backend, Lambda functions, database, and SQS queues use compatible configuration values and network permissions.
+
+**Important:** Terraform infrastructure provisioning and application deployment are separate steps. Configure and verify both before sending production traffic.
+
+## 🔐 Environment Variables
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Asynchronous PostgreSQL connection URL |
+| `SYNC_DATABASE_URL` | Synchronous database URL for migrations and Lambda |
+| `AWS_REGION` | AWS deployment region |
+| `SQS_WEBHOOK_QUEUE_URL` | Main SQS queue URL |
+| `SQS_DLQ_URL` | Dead-letter queue URL |
+| `LOCALSTACK_ENDPOINT` | LocalStack endpoint for local development |
+| `MAX_RETRY_ATTEMPTS` | Maximum configured delivery attempts |
+| `INITIAL_RETRY_DELAY_SECONDS` | Initial retry delay |
+| `DELIVERY_TIMEOUT_SECONDS` | HTTP delivery timeout |
+| `OPENAI_API_KEY` | Optional key for AI failure explanations |
+| `SECRET_KEY` | Application secret used by the backend |
+
+Refer to `.env.example` for the expected configuration and default values.
+
+## ⚠️ Known Limitations
+
+- **At-least-once delivery:** Destination services must handle duplicate webhook requests safely.
+- **Lambda cold starts:** The first invocation after inactivity may introduce additional latency.
+- **Retry delay limits:** SQS message delays are limited to 15 minutes. Longer retry schedules require an additional scheduling mechanism.
+- **Signature verification:** The current implementation does not include a complete HMAC signature verification flow.
+- **Database testing:** SQLite-based tests do not cover every PostgreSQL-specific behavior.
+- **Single-region deployment:** The current Terraform configuration targets a single AWS region.
+- **AI explanation accuracy:** LLM-generated failure explanations may be incomplete or incorrect. Verify them against delivery logs and the original response.
+- **Production hardening:** Authentication, authorization, endpoint validation, secret management, and other security controls should be reviewed before exposing the service to production traffic.
+
+## 🔮 Potential Improvements
+
+- Add HMAC-signed webhook requests and destination-side signature verification.
+- Introduce configurable retry policies and longer scheduled retry intervals.
+- Add per-endpoint delivery metrics, latency tracking, and success-rate analytics.
+- Implement authentication, role-based access control, and audit trails for administrative operations.
+- Add integration tests against PostgreSQL and AWS-compatible services.
+- Support multi-region deployment and disaster recovery.
+- Improve AI-generated failure explanations with structured error context and relevant delivery logs.
+
+## 🎯 Project Goal
+
+QueueGuard explores how backend engineering, asynchronous messaging, serverless computing, infrastructure as code, and optional AI-assisted diagnostics can work together to improve the reliability and observability of event-driven systems.
 
 ---
 
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | *(local pg)* | Async PostgreSQL URL (`postgresql+asyncpg://...`) |
-| `SYNC_DATABASE_URL` | *(local pg)* | Sync URL for Alembic + Lambda |
-| `AWS_REGION` | `us-east-1` | AWS region |
-| `SQS_WEBHOOK_QUEUE_URL` | *(localstack)* | Main SQS queue URL |
-| `SQS_DLQ_URL` | *(localstack)* | DLQ URL |
-| `LOCALSTACK_ENDPOINT` | `http://localhost:4566` | Set to empty in production |
-| `MAX_RETRY_ATTEMPTS` | `5` | Max delivery attempts before dead-lettering |
-| `INITIAL_RETRY_DELAY_SECONDS` | `30` | First retry delay (doubles each attempt) |
-| `DELIVERY_TIMEOUT_SECONDS` | `10` | HTTP delivery timeout |
-| `OPENAI_API_KEY` | *(blank)* | Enables AI failure explanations (optional) |
-| `SECRET_KEY` | *(change me)* | App secret — use a long random string |
-
----
-
-## Known Limitations
-
-- **At-least-once, not exactly-once.** Destination endpoints must handle duplicate deliveries gracefully (e.g., by using the `X-QueueGuard-Event` header or their own idempotency check).
-- **Lambda cold starts.** The first delivery after a period of inactivity may be slower than usual.
-- **SQS delay cap.** SQS `DelaySeconds` is capped at 900 s (15 min). Very long backoff intervals are not possible without a separate scheduler (e.g., EventBridge Scheduler).
-- **No HMAC signature validation UI.** Secrets are stored as bcrypt hashes. Signature verification on the delivery path is not yet implemented.
-- **SQLite in tests only.** The test suite uses SQLite for speed. A few PostgreSQL-specific features (e.g., the `JSONB` operator) are not tested in isolation.
-- **Single-region.** The current Terraform configuration deploys to one AWS region. Multi-region failover is out of scope for this MVP.
-- **AI explainer quality.** LLM explanations are best-effort and may be incorrect or generic. Always verify with raw logs.
-#   Q u e s t G u a r d 
- 
- 
+**Built with Python, FastAPI, PostgreSQL, AWS, Terraform, and React.**
