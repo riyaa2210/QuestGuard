@@ -1,0 +1,11 @@
+# Copy to terraform.tfvars and fill in real values.
+# Never commit terraform.tfvars to source control.
+
+aws_region   = "us-east-1"
+environment  = "production"
+database_url = "postgresql+psycopg2://user:password@your-rds-host:5432/queueguard"
+
+# Optional – leave blank to disable AI explanations
+openai_api_key = ""
+
+lambda_zip_path = "../lambda/queueguard_lambda.zip"

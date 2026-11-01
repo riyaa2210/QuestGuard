@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: queueguard
+      POSTGRES_PASSWORD: queueguard
+      POSTGRES_DB: queueguard
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U queueguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── LocalStack (SQS + CloudWatch emulation) ───────────────────────────────────
+  localstack:
+    image: localstack/localstack:3.4
+    ports:
+      - "4566:4566"
+    environment:
+      SERVICES: sqs,logs,lambda
+      DEFAULT_REGION: us-east-1
+      DEBUG: 0
+    volumes:
+      - localstack_data:/var/lib/localstack
+      - ./scripts/localstack-init.sh:/etc/localstack/init/ready.d/init.sh:ro
+
+  # ── FastAPI backend ───────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://queueguard:queueguard@postgres:5432/queueguard
+      SYNC_DATABASE_URL: postgresql+psycopg2://queueguard:queueguard@postgres:5432/queueguard
+      LOCALSTACK_ENDPOINT: http://localstack:4566
+      SQS_WEBHOOK_QUEUE_URL: http://localstack:4566/000000000000/queueguard-events
+      SQS_DLQ_URL: http://localstack:4566/000000000000/queueguard-events-dlq
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_started
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    volumes:
+      - .:/workspace
+
+  # ── React frontend (dev) ──────────────────────────────────────────────────────
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev -- --host"
+
+volumes:
+  postgres_data:
+  localstack_data:
