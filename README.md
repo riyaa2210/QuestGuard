@@ -1,5 +1,4 @@
 # QueueGuard
-
 **AI-assisted webhook reliability platform.**  
 Register destination endpoints, submit webhook events, and let QueueGuard handle delivery — with automatic retries, exponential backoff, dead-lettering, idempotency, and optional LLM-powered failure explanations.
 
@@ -277,5 +276,6 @@ The FastAPI backend can be deployed to any Python host (ECS, App Runner, EC2, et
 - **SQLite in tests only.** The test suite uses SQLite for speed. A few PostgreSQL-specific features (e.g., the `JSONB` operator) are not tested in isolation.
 - **Single-region.** The current Terraform configuration deploys to one AWS region. Multi-region failover is out of scope for this MVP.
 - **AI explainer quality.** LLM explanations are best-effort and may be incorrect or generic. Always verify with raw logs.
-#   Q u e s t G u a r d  
+#   Q u e s t G u a r d 
+ 
  
